@@ -10,6 +10,17 @@
   "configuration": "Release",
   "function-runtime": "dotnet8",
   "function-memory-size": 512,
-  "function-timeout": 30,
-  "function-handler": "TenderDeduplication::TenderDeduplication.Function::FunctionHandler"
+  "function-timeout": 300,
+  "function-handler": "TenderDeduplication::TenderDeduplication.Function::FunctionHandler",
+  "framework": "net8.0",
+  "function-name": "TenderDeduplicationLambda",
+  "function-description": "A high-performance Lambda function that deduplicates incoming tender messages from SQS. It routes unique tenders to the AI queue and duplicates to a separate queue.",
+  "package-type": "Zip",
+  "function-role": "arn:aws:iam::211635102441:role/TenderDeduplicationLambdaRole",
+  "function-architecture": "x86_64",
+  "function-subnets": "subnet-0f47b68400d516b1e,subnet-072a27234084339fc",
+  "function-security-groups": "sg-0043b58a403174a59",
+  "tracing-mode": "PassThrough",
+  "environment-variables": "\u0022SOURCE_QUEUE_URL\u0022=\u0022https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo\u0022;\u0022DB_CONNECTION_STRING\u0022=\u0022Server=tender-tool-db.c2hq4seoidxc.us-east-1.rds.amazonaws.com,1433;Database=tendertool_db;User Id=admin;Password=yf2pCQJoHbxWyYj6lehx;Encrypt=True;TrustServerCertificate=True\u0022;\u0022DUPLICATE_QUEUE_URL\u0022=\u0022https://sqs.us-east-1.amazonaws.com/211635102441/DuplicatesQueue.fifo\u0022;\u0022AI_QUEUE_URL\u0022=\u0022https://sqs.us-east-1.amazonaws.com/211635102441/AIQueue.fifo\u0022",
+  "image-tag": ""
 }

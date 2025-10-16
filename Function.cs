@@ -79,9 +79,8 @@ public class Function
 
         // Configure and register the DbContext
         var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") ?? throw new InvalidOperationException("DB_CONNECTION_STRING environment variable is required.");
-        services.AddDbContext<ApplicationDbContext>(options =>
-            options.UseSqlServer(connectionString),
-            ServiceLifetime.Singleton // Singleton context is safe here as it's read-only.
+        services.AddDbContextFactory<ApplicationDbContext>(options =>
+            options.UseSqlServer(connectionString)
         );
 
         return services.BuildServiceProvider();

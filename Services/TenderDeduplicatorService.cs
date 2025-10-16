@@ -1,10 +1,5 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using TenderDeduplication.Data;
 using TenderDeduplication.Interfaces;
 
@@ -16,16 +11,18 @@ namespace TenderDeduplication.Services
     /// </summary>
     public class TenderDeduplicatorService : ITenderDeduplicatorService
     {
-        private readonly ApplicationDbContext _context;
+        // Changed the injected type from ApplicationDbContext to the factory
+        private readonly IDbContextFactory<ApplicationDbContext> _contextFactory;
         private readonly ILogger<TenderDeduplicatorService> _logger;
 
         // Static cache to hold tender numbers. It's cleared when the Lambda execution environment is recycled.
         private static Dictionary<string, HashSet<string>>? _tenderCache;
         private static readonly object _cacheLock = new object();
 
-        public TenderDeduplicatorService(ApplicationDbContext context, ILogger<TenderDeduplicatorService> logger)
+        // Update the constructor to accept the factory
+        public TenderDeduplicatorService(IDbContextFactory<ApplicationDbContext> contextFactory, ILogger<TenderDeduplicatorService> logger)
         {
-            _context = context ?? throw new ArgumentNullException(nameof(context));
+            _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -53,12 +50,12 @@ namespace TenderDeduplication.Services
 
             try
             {
-                // Create tasks to fetch all tender numbers for each source in parallel
-                var sarsTask = LoadSourceTenderNumbersAsync("SARS", _context.SarsTenders.Select(t => t.TenderNumber));
-                var eTendersTask = LoadSourceTenderNumbersAsync("eTenders", _context.eTenders.Select(t => t.TenderNumber));
-                var eskomTask = LoadSourceTenderNumbersAsync("Eskom", _context.EskomTenders.Select(t => t.TenderNumber));
-                var transnetTask = LoadSourceTenderNumbersAsync("Transnet", _context.TransnetTenders.Select(t => t.TenderNumber));
-                var sanralTask = LoadSourceTenderNumbersAsync("SANRAL", _context.SanralTenders.Select(t => t.TenderNumber));
+                // Create tasks to fetch all tender numbers. Each task will create its own DbContext via the factory.
+                var sarsTask = LoadSourceTenderNumbersAsync("SARS", context => context.SarsTenders.Select(t => t.TenderNumber));
+                var eTendersTask = LoadSourceTenderNumbersAsync("eTenders", context => context.eTenders.Select(t => t.TenderNumber));
+                var eskomTask = LoadSourceTenderNumbersAsync("Eskom", context => context.EskomTenders.Select(t => t.TenderNumber));
+                var transnetTask = LoadSourceTenderNumbersAsync("Transnet", context => context.TransnetTenders.Select(t => t.TenderNumber));
+                var sanralTask = LoadSourceTenderNumbersAsync("SANRAL", context => context.SanralTenders.Select(t => t.TenderNumber));
 
                 // Await all database queries to complete
                 await Task.WhenAll(sarsTask, eTendersTask, eskomTask, transnetTask, sanralTask);
@@ -93,10 +90,15 @@ namespace TenderDeduplication.Services
         }
 
         /// <summary>
-        /// A helper method to execute the query for a specific source and load the results into the cache.
+        /// A helper method to create a DbContext, execute the query, and load the results into the cache.
         /// </summary>
-        private async Task LoadSourceTenderNumbersAsync(string sourceKey, IQueryable<string> query)
+        private async Task LoadSourceTenderNumbersAsync(string sourceKey, Func<ApplicationDbContext, IQueryable<string>> queryBuilder)
         {
+            // Create a new DbContext instance from the factory just for this query
+            await using var context = await _contextFactory.CreateDbContextAsync();
+
+            // Build and execute the query on the new, temporary context
+            var query = queryBuilder(context);
             var tenderNumbers = await query.ToListAsync();
             var numberSet = new HashSet<string>(tenderNumbers, StringComparer.OrdinalIgnoreCase);
 

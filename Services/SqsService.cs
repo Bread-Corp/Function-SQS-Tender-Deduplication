@@ -1,11 +1,7 @@
 ﻿using Amazon.SQS;
 using Amazon.SQS.Model;
 using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Text.Json;
 using TenderDeduplication.Interfaces;
 
 namespace TenderDeduplication.Services
@@ -38,15 +34,32 @@ namespace TenderDeduplication.Services
 
             _logger.LogInformation("Starting batch send of {MessageCount} messages to queue: {QueueUrl}", messages.Count, queueUrl);
 
+            bool isFifo = queueUrl.EndsWith(".fifo");
+
             // SQS allows up to 10 messages per batch
             const int batchSize = 10;
             for (int i = 0; i < messages.Count; i += batchSize)
             {
                 var batchMessages = messages.Skip(i).Take(batchSize).ToList();
-                var entries = batchMessages.Select((msgBody, index) => new SendMessageBatchRequestEntry
+                var entries = batchMessages.Select((msgBody, index) =>
                 {
-                    Id = $"msg_{i + index}",
-                    MessageBody = msgBody
+                    var entry = new SendMessageBatchRequestEntry
+                    {
+                        Id = $"msg_{i + index}",
+                        MessageBody = msgBody
+                    };
+
+                    if (isFifo)
+                    {
+                        // MessageDeduplicationId MUST be unique for each message sent in a 5-minute window. A GUID is perfect.
+                        entry.MessageDeduplicationId = Guid.NewGuid().ToString();
+
+                        // MessageGroupId is used for ordering. Grouping by tender source is a good strategy.
+                        entry.MessageGroupId = GetSourceFromJson(msgBody) ?? "DefaultGroup";
+                    }
+
+                    return entry;
+
                 }).ToList();
 
                 var request = new SendMessageBatchRequest
@@ -128,6 +141,27 @@ namespace TenderDeduplication.Services
                     // Do not rethrow here to allow the function to complete. Reprocessing is the fallback.
                 }
             }
+        }
+
+        /// <summary>
+        /// Helper method to safely parse the JSON body and extract the 'source' property for the MessageGroupId.
+        /// </summary>
+        private string? GetSourceFromJson(string jsonBody)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonBody);
+                if (doc.RootElement.TryGetProperty("source", out var sourceProperty))
+                {
+                    return sourceProperty.GetString();
+                }
+            }
+            catch (JsonException)
+            {
+                // If JSON is malformed, we'll fall back to a default group.
+                return null;
+            }
+            return null;
         }
     }
 }
