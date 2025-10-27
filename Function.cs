@@ -9,6 +9,7 @@ using System.Text.Json;
 using TenderDeduplication.Data;
 using TenderDeduplication.Interfaces;
 using TenderDeduplication.Services;
+using System.Text.Json.Nodes;
 
 
 // Assembly attribute to enable the Lambda function's JSON input to be converted into a .NET class.
@@ -25,6 +26,7 @@ public class Function
     private readonly ITenderDeduplicatorService _deduplicatorService;
     private readonly ILogger<Function> _logger;
     private readonly IAmazonSQS _sqsClient;
+    private readonly ITenderValidationService _validationService;
 
     private readonly string _sourceQueueUrl;
     private readonly string _aiQueueUrl;
@@ -33,12 +35,17 @@ public class Function
     /// <summary>
     /// Default constructor used by AWS Lambda runtime with dependency injection.
     /// </summary>
-    public Function() : this(null, null, null, null) { }
+    public Function() : this(null, null, null, null, null) { }
 
     /// <summary>
     /// Constructor with dependency injection support for testing.
     /// </summary>
-    public Function(ISqsService? sqsService, ITenderDeduplicatorService? deduplicatorService, ILogger<Function>? logger, IAmazonSQS? sqsClient)
+    public Function(
+        ISqsService? sqsService, 
+        ITenderDeduplicatorService? deduplicatorService, 
+        ILogger<Function>? logger, 
+        IAmazonSQS? sqsClient,
+        ITenderValidationService? validationService)
     {
         var serviceProvider = ConfigureServices();
 
@@ -46,6 +53,7 @@ public class Function
         _deduplicatorService = deduplicatorService ?? serviceProvider.GetRequiredService<ITenderDeduplicatorService>();
         _logger = logger ?? serviceProvider.GetRequiredService<ILogger<Function>>();
         _sqsClient = sqsClient ?? serviceProvider.GetRequiredService<IAmazonSQS>();
+        _validationService = validationService ?? serviceProvider.GetRequiredService<ITenderValidationService>();
 
         // Load and validate required environment variables for queue configuration
         _sourceQueueUrl = Environment.GetEnvironmentVariable("SOURCE_QUEUE_URL") ?? throw new InvalidOperationException("SOURCE_QUEUE_URL environment variable is required.");
@@ -76,6 +84,7 @@ public class Function
         services.AddSingleton<ISqsService, SqsService>();
         // Use AddSingleton for the deduplicator to ensure the static cache is managed by a single instance per container.
         services.AddSingleton<ITenderDeduplicatorService, TenderDeduplicatorService>();
+        services.AddSingleton<ITenderValidationService, TenderValidationService>();
 
         // Configure and register the DbContext
         var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") ?? throw new InvalidOperationException("DB_CONNECTION_STRING environment variable is required.");
@@ -94,6 +103,7 @@ public class Function
         var functionStart = DateTime.UtcNow;
         var totalProcessed = 0;
         var totalDuplicates = 0;
+        var totalRejected = 0;
         var batchCount = 0;
 
         _logger.LogInformation("Lambda invocation started. Initial message count: {Count}", evnt.Records.Count);
@@ -111,6 +121,7 @@ public class Function
                 var initialResult = await ProcessMessageBatch(evnt.Records);
                 totalProcessed += initialResult.processed;
                 totalDuplicates += initialResult.duplicates;
+                totalRejected += initialResult.rejected;
             }
 
             // Continue polling for more messages until the time limit is approaching
@@ -128,6 +139,7 @@ public class Function
                 var batchResult = await ProcessMessageBatch(messages);
                 totalProcessed += batchResult.processed;
                 totalDuplicates += batchResult.duplicates;
+                totalRejected += batchResult.rejected;
 
                 await Task.Delay(100); // Small delay to prevent aggressive polling
             }
@@ -169,38 +181,67 @@ public class Function
     }
 
     /// <summary>
-    /// Processes a batch of SQS messages for deduplication and routes them accordingly.
+    /// Processes a batch of SQS messages, validates them, checks for duplicates, and routes them.
     /// </summary>
-    private async Task<(int processed, int duplicates)> ProcessMessageBatch(IList<SQSEvent.SQSMessage> messages)
+    private async Task<(int processed, int duplicates, int rejected)> ProcessMessageBatch(IList<SQSEvent.SQSMessage> messages)
     {
         var uniqueMessages = new List<string>();
-        var duplicateMessages = new List<string>();
+        var duplicateMessages = new List<string>(); // Will now hold duplicates AND rejected tenders
         var messagesToDelete = new List<(string id, string receiptHandle)>();
+
+        int rejectedCount = 0;
+        int duplicateCount = 0;
 
         foreach (var message in messages)
         {
+            string messageBodyForRouting = message.Body; // By default, pass the original body
+            bool isUnique = true; // Assume unique until proven otherwise
+
             try
             {
                 // Lightweight parse to extract only the necessary fields
                 using var jsonDoc = JsonDocument.Parse(message.Body);
                 var root = jsonDoc.RootElement;
 
-                var tenderNumber = root.TryGetProperty("tenderNumber", out var numberProp) ? numberProp.GetString() : null;
-                var source = root.TryGetProperty("source", out var sourceProp) ? sourceProp.GetString() : null;
+                // --- 1. VALIDATION CHECK ---
+                var validationResult = _validationService.ValidateTender(root);
+                if (!validationResult.IsValid)
+                {
+                    _logger.LogInformation("Tender {MessageId} failed validation: {Reason}", message.MessageId, validationResult.Reason);
 
-                if (string.IsNullOrWhiteSpace(tenderNumber) || string.IsNullOrWhiteSpace(source))
-                {
-                    _logger.LogWarning("Message {MessageId} is missing 'tenderNumber' or 'source'. Treating as unique to avoid data loss.", message.MessageId);
-                    uniqueMessages.Add(message.Body);
-                }
-                else if (_deduplicatorService.IsDuplicate(source, tenderNumber))
-                {
-                    _logger.LogInformation("Duplicate found for source '{Source}' with tender number '{TenderNumber}'.", source, tenderNumber);
-                    duplicateMessages.Add(message.Body);
+                    // Add the failure reason to the JSON and mark for routing to duplicate/failed queue
+                    messageBodyForRouting = AddReasonToJson(message.Body, validationResult.Reason ?? "Tender failed validation.");
+                    isUnique = false;
+                    rejectedCount++;
                 }
                 else
                 {
-                    uniqueMessages.Add(message.Body);
+                    // --- 2. DEDUPLICATION CHECK (Only if valid) ---
+                    var tenderNumber = root.TryGetProperty("tenderNumber", out var numberProp) ? numberProp.GetString() : null;
+                    var source = root.TryGetProperty("source", out var sourceProp) ? sourceProp.GetString() : null;
+
+                    if (string.IsNullOrWhiteSpace(tenderNumber) || string.IsNullOrWhiteSpace(source))
+                    {
+                        _logger.LogWarning("Message {MessageId} is missing 'tenderNumber' or 'source'. Treating as unique to avoid data loss.", message.MessageId);
+                        // isUnique remains true
+                    }
+                    else if (_deduplicatorService.IsDuplicate(source, tenderNumber))
+                    {
+                        _logger.LogInformation("Duplicate found for source '{Source}' with tender number '{TenderNumber}'.", source, tenderNumber);
+                        isUnique = false;
+                        duplicateCount++;
+                    }
+                    // else: it's unique, isUnique remains true
+                }
+
+                // --- 3. ROUTING ---
+                if (isUnique)
+                {
+                    uniqueMessages.Add(messageBodyForRouting);
+                }
+                else
+                {
+                    duplicateMessages.Add(messageBodyForRouting);
                 }
 
                 // Add to delete list regardless of outcome, as it has been processed.
@@ -211,6 +252,7 @@ public class Function
                 _logger.LogError(jsonEx, "Failed to parse JSON for message {MessageId}. Sending to duplicate/error queue.", message.MessageId);
                 duplicateMessages.Add(message.Body); // Route malformed JSON to duplicate queue for inspection.
                 messagesToDelete.Add((message.MessageId, message.ReceiptHandle));
+                rejectedCount++; // Count as rejected
             }
             catch (Exception ex)
             {
@@ -232,9 +274,43 @@ public class Function
             await _sqsService.DeleteMessageBatchAsync(_sourceQueueUrl, messagesToDelete);
         }
 
-        _logger.LogInformation("Batch processed. Unique: {UniqueCount}, Duplicates: {DuplicateCount}, Deleted: {DeletedCount}",
+        _logger.LogInformation("Batch processed. Unique: {UniqueCount}, Duplicates/Rejected: {DuplicateCount}, Deleted: {DeletedCount}",
             uniqueMessages.Count, duplicateMessages.Count, messagesToDelete.Count);
 
-        return (messages.Count, duplicateMessages.Count);
+        // Return detailed counts
+        return (messages.Count, duplicateCount, rejectedCount);
+    }
+
+    /// <summary>
+    /// Safely adds a "failureReason" property to a JSON string.
+    /// </summary>
+    /// <param name="jsonBody">The original JSON message body.</param>
+    /// <param name="reason">The failure reason to add.</param>
+    /// <returns>A new JSON string with the added property, or the original string if parsing fails.</returns>
+    private string AddReasonToJson(string jsonBody, string reason)
+    {
+        try
+        {
+            // Parse the string into a mutable JsonNode
+            var jsonNode = JsonNode.Parse(jsonBody);
+
+            if (jsonNode is not JsonObject obj)
+            {
+                // This shouldn't happen if our messages are always objects, but it's a safe check.
+                _logger.LogWarning("Cannot add failure reason, message body is not a JSON object.");
+                return jsonBody;
+            }
+
+            // Add or update the "failureReason" property
+            obj["failureReason"] = reason;
+
+            // Return the modified JSON string
+            return obj.ToJsonString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to add failure reason to JSON body. Returning original body.");
+            return jsonBody; // Return original body on any failure
+        }
     }
 }

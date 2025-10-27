@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace TenderDeduplication.Models
@@ -15,5 +16,8 @@ namespace TenderDeduplication.Models
     {
         [Required]
         public string TenderNumber { get; set; }
+
+        [JsonPropertyName("closingDate")]
+        public DateTime DateClosing { get; set; }
     }
 }
