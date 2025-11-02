@@ -58,7 +58,8 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         shell: powershell
         run: |
-          ${{ runner.temp }}\scanner\dotnet-sonarscanner begin /k:"Bread-Corp_Function-SQS-Tender-Deduplication" /o:"bread-corp" /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
+          # FIXED: Use the env var $env:SONAR_TOKEN instead of expanding the secret
+          ${{ runner.temp }}\scanner\dotnet-sonarscanner begin /k:"Bread-Corp_Function-SQS-Tender-Deduplication" /o:"bread-corp" /d:sonar.token="$env:SONAR_TOKEN"
 
       - name: Restore dependencies
         run: dotnet restore TenderDeduplication.sln
@@ -81,4 +82,5 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         shell: powershell
         run: |
-          ${{ runner.temp }}\scanner\dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
+          # FIXED: Use the env var $env:SONAR_TOKEN instead of expanding the secret
+          ${{ runner.temp }}\scanner\dotnet-sonarscanner end /d:sonar.token="$env:SONAR_TOKEN"
