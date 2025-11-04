@@ -109,27 +109,395 @@ The Lambda function is configured via environment variables. These must be set i
 | `DUPLICATE_QUEUE_URL` | ✅ Yes | The URL of the destination FIFO queue for duplicate and rejected tenders. |
 | `DB_CONNECTION_STRING` | ✅ Yes | The full connection string for the RDS SQL Server database. |
 
-## 📦 Deployment Guide
+## 📦 Deployment
 
-Time to ship it! Follow these steps to package and deploy the function to AWS Lambda. 🚢
+This section covers three deployment methods for the Tender Deduplication Lambda Function. Choose the method that best fits your workflow and infrastructure preferences.
 
-### 🔨 Step 1: Create the Deployment Package
+### 🛠️ Prerequisites
 
-Run the following command from the project's root directory. This will build the project in Release mode and create a `.zip` file ready for deployment.
+Before deploying, ensure you have:
+- AWS CLI configured with appropriate credentials 🔑
+- .NET 8 SDK installed locally
+- AWS SAM CLI installed (for SAM deployment)
+- Access to AWS Lambda, SQS, RDS, and VPC services ☁️
+- Visual Studio 2022 or VS Code with C# extensions (for AWS Toolkit deployment)
 
+### 🎯 Method 1: AWS Toolkit Deployment
+
+Deploy directly through Visual Studio using the AWS Toolkit extension.
+
+#### Setup Steps:
+1. **Install AWS Toolkit** for Visual Studio 2022
+2. **Configure AWS Profile** with your credentials in Visual Studio
+3. **Open Solution** containing `TenderDeduplication.csproj`
+
+#### Deploy Process:
+1. **Right-click** the project in Solution Explorer
+2. **Select** "Publish to AWS Lambda" from the context menu
+3. **Configure Lambda Settings**:
+   - Function Name: `TenderDeduplicationLambda`
+   - Runtime: `.NET 8`
+   - Handler: `TenderDeduplication::TenderDeduplication.Function::FunctionHandler`
+   - Memory: `512 MB`
+   - Timeout: `300 seconds`
+4. **Configure VPC Settings**:
+   - VPC: Select your existing VPC
+   - Security Groups: `sg-0043b58a403174a59`
+   - Subnets: `subnet-0f47b68400d516b1e`, `subnet-072a27234084339fc`
+5. **Set Environment Variables**:
+   ```
+   AI_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/211635102441/AIQueue.fifo
+   DB_CONNECTION_STRING=
+   DUPLICATE_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/211635102441/DuplicatesQueue.fifo
+   SOURCE_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo
+   ```
+6. **Configure IAM Role** with required permissions for SQS, RDS, VPC, and CloudWatch
+7. **Set up SQS Trigger** manually after deployment
+
+#### Post-Deployment:
+- Test the function using the AWS Toolkit test feature
+- Monitor logs through CloudWatch integration
+- Verify SQS trigger configuration and batch processing
+
+### 🚀 Method 2: SAM Deployment
+
+Use AWS SAM for infrastructure-as-code deployment with the provided template.
+
+#### Initial Setup:
 ```bash
-dotnet lambda package -c Release -o ./build/deploy-package.zip
+# Install AWS SAM CLI
+pip install aws-sam-cli
+
+# Install .NET 8 SDK
+# Download from https://dotnet.microsoft.com/download/dotnet/8.0
+
+# Verify installations
+sam --version
+dotnet --version
 ```
 
-### 🌐 Step 2: Deploy to AWS Lambda
+#### Build and Deploy:
+```bash
+# Build the .NET 8 application
+dotnet build -c Release
 
-1. Navigate to the AWS Lambda console and select the `TenderDeduplication` function. 🎛️
-2. Under the "Code source" section, click the "Upload from" button. 📤
-3. Select ".zip file". 📁
-4. Upload the `deploy-package.zip` file located in the `build` directory. ⬆️
-5. Click Save. 💾
+# Build the SAM application
+sam build
 
-> 🚨 **Important:** Ensure all AWS prerequisites (IAM roles, VPC settings, etc.) are in place before deploying.
+# Deploy with guided configuration (first time)
+sam deploy --guided
+
+# Follow the prompts:
+# Stack Name: tender-deduplication-stack
+# AWS Region: us-east-1 (or your preferred region)
+# Confirm changes before deploy: Y
+# Allow SAM to create IAM roles: Y
+# Save parameters to samconfig.toml: Y
+```
+
+#### Environment Variables Setup:
+The template already includes the required environment variables:
+
+```yaml
+# Already configured in TenderDeduplicationLambda.yaml
+Environment:
+  Variables:
+    AI_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/211635102441/AIQueue.fifo
+    DB_CONNECTION_STRING: 
+    DUPLICATE_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/211635102441/DuplicatesQueue.fifo
+    SOURCE_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo
+```
+
+#### Subsequent Deployments:
+```bash
+# Quick deployment after initial setup
+dotnet build -c Release
+sam build && sam deploy
+```
+
+#### Local Testing with SAM:
+```bash
+# Test function locally (requires Docker)
+sam local invoke TenderDeduplicationLambda
+
+# Start local API for testing
+sam local start-api
+```
+
+#### SAM Deployment Advantages:
+- ✅ Complete infrastructure management including SQS queues
+- ✅ VPC and security group configuration included
+- ✅ Environment variables defined in template
+- ✅ IAM permissions automatically configured
+- ✅ Easy rollback capabilities
+- ✅ CloudFormation integration
+- ✅ SQS trigger automatically configured
+
+### 🔄 Method 3: Workflow Deployment (CI/CD)
+
+Automated deployment using GitHub Actions workflow for production environments.
+
+#### Setup Requirements:
+1. **GitHub Repository Secrets**:
+   ```
+   AWS_ACCESS_KEY_ID: Your AWS access key
+   AWS_SECRET_ACCESS_KEY: Your AWS secret key
+   AWS_REGION: us-east-1 (or your target region)
+   ```
+
+2. **Pre-existing Lambda Function**: The workflow updates an existing function, so deploy initially using Method 1 or 2.
+
+#### Deployment Process:
+1. **Create Release Branch**:
+   ```bash
+   # Create and switch to release branch
+   git checkout -b release
+   
+   # Make your changes to the .NET code
+   # Commit changes
+   git add .
+   git commit -m "feat: update tender deduplication logic"
+   
+   # Push to trigger deployment
+   git push origin release
+   ```
+
+2. **Automatic Deployment**: The workflow will:
+   - Checkout the code
+   - Set up .NET 8 SDK
+   - Install AWS Lambda Tools
+   - Build and package the Lambda function
+   - Configure AWS credentials
+   - Update the existing Lambda function code
+   - Maintain existing configuration (environment variables, VPC settings, etc.)
+
+#### Manual Trigger:
+You can also trigger deployment manually:
+1. Go to **Actions** tab in your GitHub repository
+2. Select **"Deploy .NET Lambda to AWS"** workflow
+3. Click **"Run workflow"**
+4. Choose the `release` branch
+5. Click **"Run workflow"** button
+
+#### Workflow Deployment Advantages:
+- ✅ Automated CI/CD pipeline
+- ✅ Consistent deployment process
+- ✅ Audit trail of deployments
+- ✅ Easy rollback to previous commits
+- ✅ No local environment dependencies
+- ✅ Automatic .NET build and packaging
+
+### 🔧 Post-Deployment Configuration
+
+Regardless of deployment method, verify the following:
+
+#### Environment Variables Verification:
+Ensure these environment variables are properly set:
+
+```bash
+# Verify environment variables via AWS CLI
+aws lambda get-function-configuration \
+    --function-name TenderDeduplicationLambda \
+    --query 'Environment.Variables'
+```
+
+Expected output:
+```json
+{
+    "AI_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/211635102441/AIQueue.fifo",
+    "DB_CONNECTION_STRING": "",
+    "DUPLICATE_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/211635102441/DuplicatesQueue.fifo",
+    "SOURCE_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo"
+}
+```
+
+#### VPC Configuration Verification:
+Verify VPC settings for database and SQS access:
+
+```bash
+# Check VPC configuration
+aws lambda get-function-configuration \
+    --function-name TenderDeduplicationLambda \
+    --query 'VpcConfig'
+```
+
+#### SQS Trigger Configuration:
+Ensure the SQS trigger is properly configured:
+
+```bash
+# List event source mappings
+aws lambda list-event-source-mappings \
+    --function-name TenderDeduplicationLambda
+
+# Verify batch size and queue configuration
+aws lambda get-event-source-mapping \
+    --uuid [event-source-mapping-uuid]
+```
+
+#### Database Access Verification:
+Test database connectivity from the Lambda function:
+
+```bash
+# Invoke function to test database connection
+aws lambda invoke \
+    --function-name TenderDeduplicationLambda \
+    --payload '{"Records":[]}' \
+    response.json
+```
+
+### 🧪 Testing Your Deployment
+
+After deployment, test the function thoroughly:
+
+#### Test Message Processing:
+```bash
+# Send test message to source queue
+aws sqs send-message \
+    --queue-url https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo \
+    --message-body '{"source":"TestSource","tenderNumber":"TEST-001","closingDate":"2025-12-31T23:59:59"}' \
+    --message-group-id "TestGroup" \
+    --message-deduplication-id "test-$(date +%s)"
+
+# Monitor function execution
+aws logs tail /aws/lambda/TenderDeduplicationLambda --follow
+```
+
+#### Expected Success Indicators:
+- ✅ Function executes without errors
+- ✅ CloudWatch logs show successful database connection
+- ✅ Messages are properly routed to AI queue or duplicate queue
+- ✅ No timeout or memory errors
+- ✅ Proper deduplication logic working
+- ✅ SQS batch processing functioning correctly
+
+### 🔍 Monitoring and Maintenance
+
+#### CloudWatch Metrics to Monitor:
+- **Duration**: Function execution time for batch processing
+- **Error Rate**: Failed deduplication operations
+- **Memory Utilization**: RAM usage during processing
+- **SQS Metrics**: Message processing rates and dead letter queues
+- **Database Connection Health**: RDS connection metrics
+
+#### Log Analysis:
+```bash
+# View recent logs
+aws logs tail /aws/lambda/TenderDeduplicationLambda --follow
+
+# Search for deduplication statistics
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/TenderDeduplicationLambda \
+    --filter-pattern "Processed batch"
+
+# Search for database connection issues
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/TenderDeduplicationLambda \
+    --filter-pattern "Database connection"
+
+# Monitor SQS routing decisions
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/TenderDeduplicationLambda \
+    --filter-pattern "Routed to"
+```
+
+### 🚨 Troubleshooting Deployments
+
+<details>
+<summary><strong>.NET 8 Runtime Issues</strong></summary>
+
+**Issue**: Function fails to start or throws runtime errors
+
+**Solution**: Ensure proper .NET 8 configuration:
+- Verify the handler path: `TenderDeduplication::TenderDeduplication.Function::FunctionHandler`
+- Check that all NuGet packages are compatible with .NET 8
+- Ensure the project targets `net8.0` framework
+- Verify all dependencies are included in the deployment package
+</details>
+
+<details>
+<summary><strong>Database Connection Failures</strong></summary>
+
+**Issue**: Cannot connect to RDS SQL Server from Lambda
+
+**Solution**: Verify VPC and security configuration:
+- Ensure Lambda is in the same VPC as RDS
+- Check security groups allow traffic on port 1433
+- Verify RDS is accessible from Lambda subnets
+- Test connection string format and credentials
+- Check if RDS is in a maintenance window
+</details>
+
+<details>
+<summary><strong>SQS Message Processing Issues</strong></summary>
+
+**Issue**: Messages not being processed or routed incorrectly
+
+**Solution**: Debug SQS configuration:
+- Verify SQS trigger is configured with correct batch size (10)
+- Check message format matches expected JSON structure
+- Ensure FIFO queue attributes are properly set
+- Verify message group ID and deduplication ID logic
+- Monitor dead letter queue for failed messages
+</details>
+
+<details>
+<summary><strong>VPC Networking Problems</strong></summary>
+
+**Issue**: Function times out or cannot access AWS services
+
+**Solution**: Check VPC configuration:
+- Ensure VPC endpoints exist for SQS service access
+- Verify route tables and NAT gateway configuration
+- Check that subnets have proper CIDR ranges
+- Ensure DNS resolution is enabled in VPC settings
+- Verify security group rules allow outbound HTTPS traffic
+</details>
+
+<details>
+<summary><strong>Memory and Performance Issues</strong></summary>
+
+**Issue**: Function runs out of memory or times out
+
+**Solution**: Optimize function performance:
+- Increase memory allocation (current: 512 MB)
+- Optimize batch processing logic
+- Review database query performance
+- Consider implementing connection pooling
+- Monitor cold start times and optimize accordingly
+</details>
+
+<details>
+<summary><strong>Environment Variables Missing</strong></summary>
+
+**Issue**: Function cannot access required configuration
+
+**Solution**: Set environment variables using AWS CLI:
+```bash
+aws lambda update-function-configuration \
+    --function-name TenderDeduplicationLambda \
+    --environment Variables='{
+        "AI_QUEUE_URL":"https://sqs.us-east-1.amazonaws.com/211635102441/AIQueue.fifo",
+        "DB_CONNECTION_STRING":"",
+        "DUPLICATE_QUEUE_URL":"https://sqs.us-east-1.amazonaws.com/211635102441/DuplicatesQueue.fifo",
+        "SOURCE_QUEUE_URL":"https://sqs.us-east-1.amazonaws.com/211635102441/TenderQueue.fifo"
+    }'
+```
+</details>
+
+<details>
+<summary><strong>Workflow Deployment Fails</strong></summary>
+
+**Issue**: GitHub Actions workflow errors
+
+**Solution**: 
+- Check repository secrets are correctly configured
+- Verify .NET 8 SDK is properly installed in workflow
+- Ensure AWS Lambda Tools installation succeeds
+- Check that TenderDeduplication.csproj exists in repository
+- Verify target Lambda function exists in AWS
+</details>
+
+Choose the deployment method that best fits your development workflow and infrastructure requirements. SAM deployment is recommended for development environments, while workflow deployment excels for production systems requiring automated CI/CD pipelines.
 
 ## 🧰 Troubleshooting Guide
 
